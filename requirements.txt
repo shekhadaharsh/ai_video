@@ -1,0 +1,22 @@
+# ============================================
+# Video-to-Ad-Hooks Generator - Requirements
+# ============================================
+
+# --- Transcription (Local, Free - No API Key needed) ---
+faster-whisper          # Lightweight Whisper (4x faster, no PyTorch needed)
+
+# --- Google Gemini (Vision + Reasoning - Paid) ---
+google-generativeai     # Gemini 3.1 Pro API
+
+# --- FFmpeg Python Wrapper (Frame extraction) ---
+ffmpeg-python           # Python wrapper for FFmpeg (FFmpeg binary must be installed separately)
+
+# --- Streamlit UI ---
+streamlit               # Web UI for video upload + results viewer
+
+# --- Image Processing ---
+Pillow                  # Load frames as PIL Images for Gemini
+
+# --- Utilities ---
+python-dotenv           # Load API keys from .env file
+requests                # HTTP requests

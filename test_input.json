@@ -1,0 +1,58 @@
+{
+  "segments": {
+    "hook": {
+      "start": 0.0,
+      "end": 5.7
+    },
+    "problem": {
+      "start": 0.0,
+      "end": 5.7
+    },
+    "demo": {
+      "start": 5.7,
+      "end": 14.3
+    },
+    "result": {
+      "start": 14.3,
+      "end": 33.9
+    }
+  },
+  "applicable_hooks": [
+    {
+      "type": "Problem",
+      "evidence": "On-screen text at 4.0s explicitly states 'TANNING nhi ja rhi' while the creator applies a face mask.",
+      "best_clip": {
+        "start": 0.0,
+        "end": 5.7
+      },
+      "new_hook_script": "Tired of stubborn tanning that just won't fade away?"
+    },
+    {
+      "type": "Result",
+      "evidence": "The creator shows clear, glowing skin with the text 'Remove Tanning without any effort' at 30.0s.",
+      "best_clip": {
+        "start": 28.0,
+        "end": 33.9
+      },
+      "new_hook_script": "Watch how I removed my stubborn tan effortlessly in just one week!"
+    },
+    {
+      "type": "Testimonial",
+      "evidence": "The creator documents her personal 7-day usage journey with day-by-day visual updates.",
+      "best_clip": {
+        "start": 5.7,
+        "end": 14.3
+      },
+      "new_hook_script": "I tried this viral tan removal face wash for 7 days, and here is my honest review."
+    },
+    {
+      "type": "Before/After",
+      "evidence": "A clear split-screen visual comparing 'BEFORE' and 'AFTER' skin conditions is shown at 18.0s.",
+      "best_clip": {
+        "start": 14.3,
+        "end": 19.0
+      },
+      "new_hook_script": "You won't believe this crazy before and after tan removal transformation!"
+    }
+  ]
+}
