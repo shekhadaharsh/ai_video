@@ -41,8 +41,8 @@ def compress_video_to_720p(video_path: str, output_path: str) -> str:
         "-preset", "fast",
         "-crf", "28",           # Standard compression CRF (higher = smaller size)
         "-c:a", "aac",
-        "-b:a", "64k",          # 64kbps is perfect for LLM vocal analysis
-        "-ac", "1",             # Downmix to mono for even smaller size
+        "-b:a", "128k",         # 128kbps stereo for high-fidelity vocal analysis
+        "-ac", "2",             # Stereo — preserves original audio channel layout
         "-y",
         output_path
     ]

@@ -18,20 +18,16 @@ from google.genai import types
 from dotenv import load_dotenv
 
 from modules.utils import clean_json_response, save_json, load_json, get_paths
-from modules.cost_tracker import calculate_cost, save_cost_report
+from modules.cost_tracker import calculate_cost, save_cost_report, calculate_combined_cost
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+GEMINI_MODEL = "gemini-3.1-pro-preview"
 
-# ── Prompt Builder ─────────────────────────────────────────────────────────────
-def build_gemini_prompt(video_duration: float) -> str:
-    """
-    Build the structured analysis prompt for Gemini.
-    Merged best-of-both: user's clean structure (fallback, deduplication, 60% cap,
-    nuanced section rules, language preservation) + our TASK C cut analysis
-    (required by render.py for J/L cut audio handling and insert shot rendering).
-    """
+
+# ── Prompt Builder Pass 1 (Segments, Hooks, and Source A/V Desync) ─────────────
+def build_prompt_pass1(video_duration: float) -> str:
     return f"""You are analyzing a short influencer/UGC product video (duration: {video_duration:.1f} seconds)
 to prepare it for ad repurposing. This prompt must generalize across ANY single-product
 personal-care UGC/influencer video (soap, facewash, shampoo, skincare, haircare, etc.) —
@@ -100,13 +96,49 @@ STRICT CLIP BOUNDARY RULES (every rule applies to every best_clip):
    the stronger/more specific one and either find a different non-overlapping clip for the other
    hook type or exclude that hook type entirely from the output.
 
+════════════════════════════════════════════════════════
+TASK D — Audio/Video Sync Offset Detection:
+════════════════════════════════════════════════════════
+For EACH segment (hook, problem, demo, result), watch the speaker's lips/mouth
+movement and compare it to the audio track. Determine whether audio and video appear
+synced within that segment. If not synced, estimate the offset in seconds:
+- Positive value = audio LAGS video (lips move first, sound arrives later)
+- Negative value = audio LEADS video (sound arrives first, lips move later)
+- If synced, set the value to 0.0
+Provide this as "av_offset_seconds" on every segment object.
+
 FALLBACK BEHAVIOR (important):
-If no clip satisfying ALL of the above rules can be found for a given hook category
-(e.g. the video has no natural pauses long enough, or no clean 4-8s silence-bounded moment
-exists for that category in the required section), DO NOT force a rule-breaking clip.
-Simply exclude that hook category from the output rather than violating the boundary rules.
-If the entire video is too short, too noisy, or lacks enough distinct content to support
-ANY hook confidently, return an empty applicable_hooks array rather than guessing.
+If no clip satisfying ALL of the above rules can be found for a given hook category,
+DO NOT force a rule-breaking clip. Simply exclude that hook category from the output.
+If the entire video is too short or lacks distinct content, return an empty applicable_hooks array.
+
+════════════════════════════════════════════════════════
+OUTPUT FORMAT
+════════════════════════════════════════════════════════
+Respond ONLY with valid JSON — no markdown fences, no extra commentary:
+
+{{
+  "segments": {{
+    "hook":    {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}},
+    "problem": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}},
+    "demo":    {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}},
+    "result":  {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}
+  }},
+  "applicable_hooks": [
+    {{
+      "type": "Problem",
+      "evidence": "specific spoken line or visual cue",
+      "best_clip": {{"start": 0.0, "end": 0.0}},
+      "new_hook_script": "max 8 word text overlay"
+    }}
+  ]
+}}"""
+
+
+# ── Prompt Builder Pass 2 (Deep Cut Analysis) ──────────────────────────────────
+def build_prompt_pass2(video_duration: float) -> str:
+    return f"""You are analyzing the editing cuts and B-roll of a short product video (duration: {video_duration:.1f} seconds).
+Please watch the video frames AND listen to the audio to identify editing structures.
 
 ════════════════════════════════════════════════════════
 TASK C — Cut Analysis (required for accurate video editing)
@@ -157,20 +189,6 @@ OUTPUT FORMAT
 Respond ONLY with valid JSON — no markdown fences, no extra commentary:
 
 {{
-  "segments": {{
-    "hook":    {{"start": 0.0, "end": 0.0}},
-    "problem": {{"start": 0.0, "end": 0.0}},
-    "demo":    {{"start": 0.0, "end": 0.0}},
-    "result":  {{"start": 0.0, "end": 0.0}}
-  }},
-  "applicable_hooks": [
-    {{
-      "type": "Problem",
-      "evidence": "specific spoken line or visual cue",
-      "best_clip": {{"start": 0.0, "end": 0.0}},
-      "new_hook_script": "max 8 word text overlay"
-    }}
-  ],
   "cut_analysis": {{
     "segment_boundaries": {{
       "hook_end":    {{"cut_type": "hard_cut", "audio_offset_seconds": 0.0, "is_mid_action": false, "safe_timestamp": 0.0}},
@@ -185,13 +203,13 @@ Respond ONLY with valid JSON — no markdown fences, no extra commentary:
       {{"timestamp": 0.0, "description": "subject is mid-motion", "safe_timestamp": 0.0}}
     ],
     "match_cuts": [
-      {{"timestamp": 0.0, "connected_by": "visual element connecting the two shots"}}
+      {{"timestamp": 0.0, "connected_by": "connected by shape/motion"}}
     ],
     "invisible_cuts": [
-      {{"timestamp": 0.0, "hidden_by": "camera pan / object blocking / color match"}}
+      {{"timestamp": 0.0, "hidden_by": "camera motion / passing object"}}
     ],
     "cutaway_shots": [
-      {{"start": 0.0, "end": 0.0, "shows": "what the cutaway shows", "returns_to_timestamp": 0.0}}
+      {{"start": 0.0, "end": 0.0, "shows": "what is shown", "returns_to_timestamp": 0.0}}
     ],
     "cross_cut_threads": {{
       "detected": false,
@@ -200,16 +218,13 @@ Respond ONLY with valid JSON — no markdown fences, no extra commentary:
       "primary_thread": "a"
     }},
     "reaction_shots": [
-      {{"start": 0.0, "end": 0.0, "emotion": "amazement", "context": "what triggered the reaction"}}
+      {{"start": 0.0, "end": 0.0, "emotion": "emotion", "context": "context"}}
     ],
     "montage_sequences": [
-      {{"start": 0.0, "end": 0.0, "description": "what the montage shows"}}
+      {{"start": 0.0, "end": 0.0, "description": "description"}}
     ]
   }}
 }}"""
-
-
-
 
 
 # ── JSON Validator ─────────────────────────────────────────────────────────────
@@ -231,6 +246,8 @@ def validate_analysis_schema(data: dict) -> tuple[bool, str]:
     for seg_name, seg_val in data["segments"].items():
         if "start" not in seg_val or "end" not in seg_val:
             return False, f"Segment '{seg_name}' missing start/end"
+        # Ensure av_offset_seconds exists (default to 0.0 if prompt failed to include it)
+        seg_val.setdefault("av_offset_seconds", 0.0)
 
     if not isinstance(data["applicable_hooks"], list):
         return False, "'applicable_hooks' must be a list"
@@ -249,31 +266,21 @@ def validate_analysis_schema(data: dict) -> tuple[bool, str]:
     return True, ""
 
 
-# ── Main Analysis ──────────────────────────────────────────────────────────────
+# ── Main Analysis (Two-Pass Orchestrator) ──────────────────────────────────────
 def run_vision_analysis(
     video_id: str,
     video_duration: float,
     compressed_video_path: str
 ) -> dict:
     """
-    Full Step 4 orchestration using native Gemini File API.
-      1. Upload compressed 720p video copy
-      2. Poll status until ACTIVE
-      3. Call Gemini model
-      4. Parse + validate JSON response
-      5. Save outputs (analysis.json & cost_report.json)
-      6. Delete video file from Google servers
-
-    Args:
-        video_id:              Unique ID for this pipeline run
-        video_duration:        Video duration in seconds
-        compressed_video_path: Path to the 720p compressed video file
-
-    Returns:
-        analysis dict
+    Full Step 4 orchestration using native Gemini File API in TWO sequential calls.
+      Pass 1: Segments, Hooks, and Source A/V Offset (Task A, B, D)
+      Pass 2: Detailed Cut Analysis (Task C)
+    Resilient design: If Pass 2 fails, we fallback to default cut analysis
+    rather than failing the entire run.
     """
     paths = get_paths(video_id)
-    client = get_gemini_client()
+    client = genai.Client()
     uploaded_file = None
 
     try:
@@ -295,81 +302,117 @@ def run_vision_analysis(
 
         logger.info("✓ Video processed and ACTIVE on Google servers!")
 
-        # 3. Call Gemini Model
-        prompt_text = build_gemini_prompt(video_duration)
-        logger.info(f"Calling Gemini ({GEMINI_MODEL}) with native video...")
+        # ──────────────────────────────────────────────────────────────────────
+        # CALL 1: Task A + B + D (Segments, Hooks, Desync)
+        # ──────────────────────────────────────────────────────────────────────
+        prompt1 = build_prompt_pass1(video_duration)
+        logger.info(f"Calling Gemini Pass 1 (Task A+B+D)...")
 
-        response = client.models.generate_content(
+        resp1 = client.models.generate_content(
             model=GEMINI_MODEL,
-            contents=[uploaded_file, prompt_text],
+            contents=[uploaded_file, prompt1],
             config=types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=8192,  # Increased: 12 cut types + full analysis can exceed 4096
+                max_output_tokens=4096,
             )
         )
+        logger.info("Pass 1 response received. Parsing JSON...")
 
-        raw_text = response.text
-        usage_metadata = response.usage_metadata
-
-        logger.info("Gemini response received. Parsing JSON...")
-
-        # Attempt 1: Parse full response
-        cleaned_text = clean_json_response(raw_text)
+        raw_text1 = resp1.text
+        cleaned_text1 = clean_json_response(raw_text1)
         analysis = None
         last_error = None
 
         try:
-            analysis = json.loads(cleaned_text)
+            analysis = json.loads(cleaned_text1)
         except json.JSONDecodeError as e:
             last_error = e
-            logger.warning(f"Full response parse failed: {e}. Retrying with simplified prompt...")
+            logger.warning(f"Pass 1 response parse failed: {e}. Retrying with fallback...")
 
-        # Attempt 2: Retry with simplified prompt (Tasks A+B only, no cut analysis)
+        # Fallback for Pass 1: simplified JSON structure
         if analysis is None:
             simplified_prompt = f"""You are analyzing a short product video ({video_duration:.1f}s).
 Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
-{{\"segments\": {{\"hook\": {{\"start\": 0.0, \"end\": 0.0}}, \"problem\": {{\"start\": 0.0, \"end\": 0.0}}, \"demo\": {{\"start\": 0.0, \"end\": 0.0}}, \"result\": {{\"start\": 0.0, \"end\": 0.0}}}}, \"applicable_hooks\": [{{\"type\": \"Problem\", \"evidence\": \"\", \"best_clip\": {{\"start\": 0.0, \"end\": 0.0}}, \"new_hook_script\": \"\"}}]}}"""
+{{"segments": {{"hook": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "problem": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "demo": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "result": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}}}, "applicable_hooks": [{{"type": "Problem", "evidence": "", "best_clip": {{"start": 0.0, "end": 0.0}}, "new_hook_script": ""}}]}}"""
 
-            logger.info("Retrying Gemini with simplified prompt (no cut analysis)...")
-            retry_response = client.models.generate_content(
+            logger.info("Retrying Gemini Pass 1 with simplified fallback...")
+            retry_resp = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[uploaded_file, simplified_prompt],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=2048,
+                )
+            )
+            retry_text = clean_json_response(retry_resp.text)
+            try:
+                analysis = json.loads(retry_text)
+                logger.info("Pass 1 fallback succeeded.")
+            except json.JSONDecodeError as e2:
+                raise ValueError(
+                    f"Both Gemini Pass 1 attempts returned invalid JSON.\n"
+                    f"Attempt 1 error: {last_error}\n"
+                    f"Attempt 2 error: {e2}\n"
+                    f"Raw response 1:\n{raw_text1[:500]}"
+                )
+
+        # Validate Pass 1 schema
+        is_valid, error_msg = validate_analysis_schema(analysis)
+        if not is_valid:
+            raise ValueError(f"Gemini response schema validation failed: {error_msg}")
+
+        # ──────────────────────────────────────────────────────────────────────
+        # CALL 2: Task C (Deep Cut Analysis)
+        # ──────────────────────────────────────────────────────────────────────
+        prompt2 = build_prompt_pass2(video_duration)
+        logger.info(f"Calling Gemini Pass 2 (Task C — Cut Analysis)...")
+
+        # Keep metadata track in case call 2 is successful
+        resp2_metadata = None
+        try:
+            resp2 = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[uploaded_file, prompt2],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
                     max_output_tokens=4096,
                 )
             )
-            retry_text = clean_json_response(retry_response.text)
-            try:
-                analysis = json.loads(retry_text)
-                # Ensure cut_analysis exists (empty) so pipeline doesn't crash
-                analysis.setdefault("cut_analysis", {})
-                logger.info("Simplified prompt succeeded.")
-            except json.JSONDecodeError as e2:
-                raise ValueError(
-                    f"Both Gemini attempts returned invalid JSON.\n"
-                    f"Attempt 1 error: {last_error}\n"
-                    f"Attempt 2 error: {e2}\n"
-                    f"Raw response (first 500 chars):\n{raw_text[:500]}"
-                )
+            resp2_metadata = resp2.usage_metadata
+            logger.info("Pass 2 response received. Merging JSON...")
 
-        # Validate schema
-        is_valid, error_msg = validate_analysis_schema(analysis)
-        if not is_valid:
-            raise ValueError(f"Gemini response schema validation failed: {error_msg}")
+            raw_text2 = resp2.text
+            cleaned_text2 = clean_json_response(raw_text2)
+            cut_data = json.loads(cleaned_text2)
 
-        # Save analysis.json
+            # Merge cut analysis into final dict
+            analysis["cut_analysis"] = cut_data.get("cut_analysis", {})
+        except Exception as e_cut:
+            logger.warning(f"⚠️ Pass 2 (Cut Analysis) failed or returned invalid JSON: {e_cut}. Continuing with empty cut_analysis.")
+            analysis["cut_analysis"] = {
+                "segment_boundaries": {
+                    "hook_end": {"cut_type": "default", "audio_offset_seconds": 0.0, "is_mid_action": False, "safe_timestamp": 0.0},
+                    "problem_end": {"cut_type": "default", "audio_offset_seconds": 0.0, "is_mid_action": false, "safe_timestamp": 0.0},
+                    "demo_end": {"cut_type": "default", "audio_offset_seconds": 0.0, "is_mid_action": False, "safe_timestamp": 0.0}
+                }
+            }
+
+        # 3. Save combined analysis.json
         save_json(analysis, paths["analysis"])
         logger.info(f"✓ Analysis saved: {paths['analysis']}")
 
-        # Save cost report
-        cost_report = calculate_cost(usage_metadata)
+        # 4. Save aggregated cost report
+        metadata_list = [resp1.usage_metadata]
+        if resp2_metadata:
+            metadata_list.append(resp2_metadata)
+
+        cost_report = calculate_combined_cost(metadata_list)
         save_cost_report(cost_report, paths["cost_report"])
 
         return analysis
 
     finally:
-        # 4. Clean up: ALWAYS delete the video file from Google servers
+        # ALWAYS delete the video file from Google servers
         if uploaded_file:
             try:
                 logger.info(f"Cleaning up: deleting video file {uploaded_file.name} from Google servers...")

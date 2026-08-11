@@ -39,7 +39,6 @@ TEXT_COLOR       = "white"
 TEXT_BOX_COLOR   = "black@0.75"          # Darker background for high contrast
 TEXT_BOX_PADDING = 12
 TEXT_POSITION_Y  = "h*0.72"             # Bottom-third — avoids face overlap
-TEXT_TIME_LIMIT  = 4.0                  # Max seconds text stays on screen
 
 # Audio crossfade duration at every clip boundary (seconds)
 AUDIO_FADE_DURATION = 0.05
@@ -114,6 +113,37 @@ def _run_ffmpeg(cmd: list, step_name: str) -> None:
     logger.info(f"  FFmpeg [{step_name}]: done ✓")
 
 
+# ── Boundary Cut Info Helper ──────────────────────────────────────────────────
+def get_boundary_cut_info(actual_timestamp, hook_end_ref, demo_end_ref, hook_bnd, demo_bnd, tolerance=0.3):
+    if abs(actual_timestamp - hook_end_ref) <= tolerance:
+        return hook_bnd.get("cut_type", "default"), abs(hook_bnd.get("audio_offset_seconds", 0.0))
+    if abs(actual_timestamp - demo_end_ref) <= tolerance:
+        return demo_bnd.get("cut_type", "default"), abs(demo_bnd.get("audio_offset_seconds", 0.0))
+    return "default", 0.0
+
+
+# ── Segment Helper for AV Offset ──────────────────────────────────────────────
+def get_segment_for_clip(clip_start: float, clip_end: float, segments_meta: dict | None) -> dict:
+    if not segments_meta:
+        return {"av_offset_seconds": 0.0}
+    for name, seg in segments_meta.items():
+        if seg.get("start", 0.0) <= clip_start + 0.1 < seg.get("end", 999.0):
+            return seg
+    return {"av_offset_seconds": 0.0}
+
+
+def get_corrected_audio_trim(video_start: float, video_end: float, av_offset_seconds: float):
+    audio_start = video_start + av_offset_seconds
+    audio_end = video_end + av_offset_seconds
+    if audio_start < 0.0:
+        logger.warning(
+            f"AV-offset correction clamped: audio_start {audio_start:.2f}s -> 0.0s "
+            f"(offset {av_offset_seconds:.2f}s may be too large for this clip's position)"
+        )
+        audio_start = 0.0
+    return audio_start, audio_end
+
+
 # ── Interval Subtraction Helper ────────────────────────────────────────────────
 def subtract_interval(
     base_intervals: list[tuple[float, float]],
@@ -136,9 +166,7 @@ def subtract_interval(
             result.append((sub_end, end))
         elif start < sub_start and end > sub_start and end <= sub_end:
             result.append((start, sub_start))
-        # else: interval is completely inside subtractor → discard
 
-    # Filter out extremely short clips to avoid FFmpeg glitches
     return [inv for inv in result if (inv[1] - inv[0]) >= 0.2]
 
 
@@ -176,7 +204,6 @@ def snap_to_clean_boundary(timestamp: float, cut_analysis: dict) -> float:
         m_start = m.get("start", -1)
         m_end   = m.get("end",   -1)
         if m_start < timestamp < m_end:
-            # Choose the nearer edge
             if (timestamp - m_start) < (m_end - timestamp):
                 snapped = round(max(0.0, m_start - 0.05), 3)
                 logger.info(f"  Boundary snapped: {timestamp:.2f}s → {snapped:.2f}s (before montage {m_start:.2f}s–{m_end:.2f}s)")
@@ -185,8 +212,7 @@ def snap_to_clean_boundary(timestamp: float, cut_analysis: dict) -> float:
                 logger.info(f"  Boundary snapped: {timestamp:.2f}s → {snapped:.2f}s (after montage {m_start:.2f}s–{m_end:.2f}s)")
             return snapped
 
-    # FIXED: Invisible cuts — move AWAY from the cut point.
-    # Our cut placed near an invisible cut would destroy its seamlessness.
+    # Invisible cuts — move AWAY from the cut point.
     invisible = cut_analysis.get("invisible_cuts", [])
     for ic in invisible:
         ic_ts = ic.get("timestamp", -999)
@@ -223,26 +249,27 @@ def render_variant_filter_complex(
     Video and Audio use SEPARATE concat chains for true AV boundary independence.
 
     Segment dict fields:
-      start (float), end (float), text (str|None),
-      cut_type (str), audio_offset (float)
+      start (float), end (float), audio_start (float), audio_end (float),
+      text (str|None), cut_type (str), audio_offset (float)
     """
     font_path    = _find_font()
     n            = len(segments)
     filter_parts = []
 
     # -- Phase 1: Pre-compute per-segment audio trim points --
-    audio_starts = [seg["start"] for seg in segments]
-    audio_ends   = [seg["end"] for seg in segments]
+    audio_starts = [seg.get("audio_start", seg["start"]) for seg in segments]
+    audio_ends   = [seg.get("audio_end", seg["end"]) for seg in segments]
 
     for i in range(n):
         if i > 0:
-            cut_type = segments[i].get("cut_type", "default")
-            aud_offset = float(segments[i].get("audio_offset", 0.0))
+            # Symmetrical J/L cuts use cut_type of the boundary between i-1 and i (stored on segments[i-1])
+            cut_type = segments[i-1].get("cut_type", "default")
+            aud_offset = float(segments[i-1].get("audio_offset", 0.0))
             if cut_type in ("j_cut", "l_cut") and aud_offset < 0.1:
                 aud_offset = 0.35
 
             if cut_type == "j_cut" and aud_offset > 0:
-                original_start = segments[i]["start"]
+                original_start = audio_starts[i]
                 new_start = max(0.0, original_start - aud_offset)
                 actual_shift = original_start - new_start
                 audio_starts[i] = new_start
@@ -257,12 +284,30 @@ def render_variant_filter_complex(
     audio_starts = [max(0.0, round(t, 3)) for t in audio_starts]
     audio_ends   = [max(audio_starts[k] + 0.1, round(t, 3)) for k, t in enumerate(audio_ends)]
 
+    # ── Safety Check: Verify total AV duration match ──
+    total_v_dur = sum(seg["end"] - seg["start"] for seg in segments)
+    total_a_dur = sum(audio_ends[k] - audio_starts[k] for k in range(n))
+    if abs(total_v_dur - total_a_dur) > 0.05:
+        logger.warning(
+            f"  ⚠️ Audio/Video duration mismatch detected after J/L shifts: "
+            f"Video={total_v_dur:.3f}s, Audio={total_a_dur:.3f}s. "
+            f"Falling back to default unshifted audio trims to prevent desync."
+        )
+        audio_starts = [seg.get("audio_start", seg["start"]) for seg in segments]
+        audio_ends   = [seg.get("audio_end", seg["end"]) for seg in segments]
+        audio_starts = [max(0.0, round(t, 3)) for t in audio_starts]
+        audio_ends   = [max(audio_starts[k] + 0.1, round(t, 3)) for k, t in enumerate(audio_ends)]
+
     # -- Phase 2: Build per-segment video + audio filter chains --
     for i, seg in enumerate(segments):
         start    = seg["start"]
         end      = seg["end"]
         duration = max(0.1, round(end - start, 3))
-        cut_type = seg.get("cut_type", "default")
+
+        # Outgoing boundary cut type (boundary after this segment) is segments[i]["cut_type"]
+        # Incoming boundary cut type (boundary before this segment) is segments[i-1]["cut_type"] if i > 0 else "default"
+        out_cut_type = seg.get("cut_type", "default")
+        in_cut_type  = segments[i-1].get("cut_type", "default") if i > 0 else "default"
 
         # ── Video filter chain for this segment ──
         vchain = (
@@ -273,7 +318,6 @@ def render_variant_filter_complex(
         )
 
         if seg.get("text"):
-            # Write text to temp UTF-8 file (avoids CLI encoding issues)
             txt_path = str(Path(txt_dir) / f"seg_{i}.txt")
             wrapped  = wrap_text(seg["text"], max_chars=28)
             with open(txt_path, "w", encoding="utf-8") as tf:
@@ -282,6 +326,8 @@ def render_variant_filter_complex(
             escaped_txt  = txt_path.replace("\\", "/").replace(":", "\\:")
             escaped_font = font_path.replace("\\", "/").replace(":", "\\:") if font_path else ""
 
+            # Dynamic fade-out: start fade-out exactly 0.5s before segment ends
+            fade_start = max(0.5, duration - 0.5)
             drawtext = (
                 f"drawtext="
                 f"textfile='{escaped_txt}':"
@@ -293,50 +339,49 @@ def render_variant_filter_complex(
                 f"boxcolor={TEXT_BOX_COLOR}:"
                 f"boxborderw={TEXT_BOX_PADDING}:"
                 f"line_spacing=8:"
-                f"bordercolor=black@0.8:borderw=2:"              # Text border for high contrast
-                f"alpha='if(lt(t,3.0),1,max(0,1-(t-3.0)/0.5))'"  # Fade out from 3.0s-3.5s
+                f"bordercolor=black@0.8:borderw=2:"
+                f"alpha='if(lt(t,{fade_start:.2f}),1,max(0,1-(t-{fade_start:.2f})/0.5))'"
             )
             if escaped_font:
-                drawtext = f"fontfile='{escaped_font}':" + drawtext.replace("drawtext=", "drawtext=")
                 drawtext = f"drawtext=fontfile='{escaped_font}':" + drawtext.split("drawtext=", 1)[1]
 
             vchain += f",{drawtext}"
 
-        # ── Video fade at segment boundaries for smooth transitions ──
-        vid_fade_d = 0.08  # 80ms video fade — subtle, not a full dissolve
-        if cut_type not in ("smash_cut", "invisible_cut", "hard_cut"):
-            if i < n - 1:
-                vchain += f",fade=t=out:st={max(0.0, duration - vid_fade_d):.3f}:d={vid_fade_d:.3f}"
-            if i > 0:
-                vchain += f",fade=t=in:st=0:d={vid_fade_d:.3f}"
+        # ── Video fade at segment boundaries (symmetrical) ──
+        vid_fade_d = 0.08
+        if i < n - 1 and out_cut_type not in ("smash_cut", "invisible_cut", "hard_cut"):
+            vchain += f",fade=t=out:st={max(0.0, duration - vid_fade_d):.3f}:d={vid_fade_d:.3f}"
+        if i > 0 and in_cut_type not in ("smash_cut", "invisible_cut", "hard_cut"):
+            vchain += f",fade=t=in:st=0:d={vid_fade_d:.3f}"
 
         filter_parts.append(f"{vchain}[v{i}]")
 
-        # -- Audio chain (J/L-adjusted trim points) --
+        # -- Audio chain (J/L-adjusted trim points with symmetrical fades) --
         a_start  = audio_starts[i]
         a_end    = audio_ends[i]
         a_dur    = max(0.1, round(a_end - a_start, 3))
-        base_fade = CUT_FADE_MAP.get(cut_type, CUT_FADE_MAP["default"])
-        fade_d   = min(base_fade, a_dur / 3)
+        
+        out_base_fade = CUT_FADE_MAP.get(out_cut_type, CUT_FADE_MAP["default"])
+        out_fade_d    = min(out_base_fade, a_dur / 3)
+        
+        in_base_fade  = CUT_FADE_MAP.get(in_cut_type, CUT_FADE_MAP["default"])
+        in_fade_d     = min(in_base_fade, a_dur / 3)
 
         achain = (
             f"[0:a]atrim=start={a_start}:end={a_end},"
             f"asetpts=PTS-STARTPTS"
         )
-        # J/L cuts handled via timestamp offset -- no extra fade needed
-        if cut_type not in ("j_cut", "l_cut"):
-            if i < n - 1:
-                achain += f",afade=t=out:st={max(0.0, a_dur - fade_d):.3f}:d={fade_d:.3f}"
-            # Apply minimal 0.02s fade-in to the first segment (i=0) to prevent pop.
-            # Longer fade-in would mute the start of the first word since frame_analyzer
-            # already snaps accurately to silence.end.
-            fade_in_d = 0.02 if i == 0 else fade_d
-            achain += f",afade=t=in:st=0:d={fade_in_d:.3f}"
+        if out_cut_type not in ("j_cut", "l_cut") and i < n - 1:
+            achain += f",afade=t=out:st={max(0.0, a_dur - out_fade_d):.3f}:d={out_fade_d:.3f}"
+        
+        if in_cut_type not in ("j_cut", "l_cut") and i > 0:
+            achain += f",afade=t=in:st=0:d={in_fade_d:.3f}"
+        elif i == 0:
+            achain += f",afade=t=in:st=0:d=0.02"
 
         filter_parts.append(f"{achain}[a{i}]")
 
     # -- Phase 3: Separate video and audio concat chains --
-    # Video switches at natural timestamps; audio at J/L-adjusted timestamps.
     video_inputs = "".join(f"[v{i}]" for i in range(n))
     audio_inputs = "".join(f"[a{i}]" for i in range(n))
     filter_parts.append(f"{video_inputs}concat=n={n}:v=1:a=0[outv]")
@@ -394,17 +439,12 @@ def render_single_hook(
     result_clip: dict,
     output_path: str,
     txt_dir: str,
-    cut_analysis: dict | None = None
+    cut_analysis: dict | None = None,
+    segments_meta: dict | None = None
 ) -> str:
     """
     Render one complete ad variant in a single FFmpeg filter_complex pass.
     Subtracts hook range from demo/result to prevent duplicate footage.
-    Uses cut_analysis to:
-      - Snap boundaries away from jump cuts and mid-action points
-      - Apply cut-type-aware audio fade durations per boundary
-
-    Structure:
-      [New hook text overlay clip] + [Remaining demo/result segments]
     """
     hook_type    = hook["type"]
     hook_text    = hook.get("new_hook_script", "")
@@ -419,14 +459,9 @@ def render_single_hook(
     snapped_start = snap_to_clean_boundary(best_clip["start"], cut_analysis)
     snapped_end   = snap_to_clean_boundary(best_clip["end"],   cut_analysis)
 
-    # Safety guard: detect if hook clip is unreasonably long (> 50% of total video)
-    # This catches the edge case where Gemini ignores the 60% segment rule and
-    # selects the full video as a hook, making the ad look identical to the source.
-    # We do NOT clamp to a fixed duration — the clip length is determined by natural
-    # speech boundaries and can be anywhere from 3s to 15s depending on the video.
+    # ── Safety guard: dynamic warning only ──
     clip_duration = snapped_end - snapped_start
     try:
-        import subprocess
         from modules.utils import find_ffmpeg
         ffprobe_path = find_ffmpeg().replace("ffmpeg", "ffprobe")
         r = subprocess.run(
@@ -439,31 +474,43 @@ def render_single_hook(
         max_allowed = total_duration * 0.5
         if total_duration > 0 and clip_duration > max_allowed:
             logger.warning(
-                f"  Hook clip {clip_duration:.1f}s is > 50% of total video ({total_duration:.1f}s). "
+                f"  ⚠️ Hook clip {clip_duration:.1f}s is > 50% of total video ({total_duration:.1f}s). "
                 f"This may make the ad look identical to the source. "
-                f"Re-analyse the video with a stricter prompt if this persists."
             )
     except Exception:
-        pass  # Guard is best-effort; never block rendering
+        pass
 
     # Resolve cut type + audio offset for every named boundary
     boundaries = cut_analysis.get("segment_boundaries", {})
+    hook_bnd   = boundaries.get("hook_end", {})
+    demo_bnd   = boundaries.get("demo_end", {})
 
-    hook_bnd      = boundaries.get("hook_end",    {})
-    hook_cut_type = hook_bnd.get("cut_type",           "default")
-    hook_aud_off  = abs(hook_bnd.get("audio_offset_seconds", 0.0))
+    hook_end_ref = demo_clip["start"]
+    demo_end_ref = result_clip["start"]
 
-    demo_bnd      = boundaries.get("demo_end",    {})
-    demo_cut_type = demo_bnd.get("cut_type",           "default")
-    demo_aud_off  = abs(demo_bnd.get("audio_offset_seconds", 0.0))
+    # Check boundary 0 (end of hook segment)
+    cut0_type, cut0_off = get_boundary_cut_info(
+        actual_timestamp=snapped_end,
+        hook_end_ref=hook_end_ref,
+        demo_end_ref=demo_end_ref,
+        hook_bnd=hook_bnd,
+        demo_bnd=demo_bnd
+    )
 
-    # Segment 0: hook clip with text overlay + cut info at its END boundary
+    # Apply source-level A/V offset correction first
+    seg_info = get_segment_for_clip(snapped_start, snapped_end, segments_meta)
+    av_offset = seg_info.get("av_offset_seconds", 0.0)
+    a_start, a_end = get_corrected_audio_trim(snapped_start, snapped_end, av_offset)
+
+    # Segment 0: hook clip with text overlay
     segments = [{
         "start":        snapped_start,
         "end":          snapped_end,
+        "audio_start":  a_start,
+        "audio_end":    a_end,
         "text":         hook_text,
-        "cut_type":     hook_cut_type,
-        "audio_offset": hook_aud_off
+        "cut_type":     cut0_type,
+        "audio_offset": cut0_off
     }]
 
     # Subtract hook range from demo + result intervals
@@ -478,14 +525,24 @@ def render_single_hook(
         snapped_s = snap_to_clean_boundary(start, cut_analysis)
         snapped_e = snap_to_clean_boundary(end,   cut_analysis)
 
-        # First remaining segment: transition from hook (cut type already on hook seg)
-        # Subsequent segments: use demo_end cut type (demo→result boundary)
-        this_cut_type = "default" if seg_idx == 0 else demo_cut_type
-        this_aud_off  = 0.0       if seg_idx == 0 else demo_aud_off
+        # Cut info at the end of this segment
+        this_cut_type, this_aud_off = get_boundary_cut_info(
+            actual_timestamp=snapped_e,
+            hook_end_ref=hook_end_ref,
+            demo_end_ref=demo_end_ref,
+            hook_bnd=hook_bnd,
+            demo_bnd=demo_bnd
+        )
+
+        seg_info = get_segment_for_clip(snapped_s, snapped_e, segments_meta)
+        av_offset = seg_info.get("av_offset_seconds", 0.0)
+        rem_a_start, rem_a_end = get_corrected_audio_trim(snapped_s, snapped_e, av_offset)
 
         segments.append({
             "start":        snapped_s,
             "end":          snapped_e,
+            "audio_start":  rem_a_start,
+            "audio_end":    rem_a_end,
             "text":         None,
             "cut_type":     this_cut_type,
             "audio_offset": this_aud_off
@@ -512,26 +569,16 @@ def run_rendering_pipeline(
     """
     Main rendering orchestrator — reads analysis.json and renders
     one .mp4 per applicable hook using filter_complex single-pass.
-
-    Args:
-        analysis_json_path:  Path to analysis.json from Gemini step
-        source_video_path:   Path to the original source video
-        output_dir:          Directory to save final output videos
-        progress_callback:   Optional callable(current, total, hook_type)
-
-    Returns:
-        List of dicts: [{"type": str, "path": str, "filename": str, "hook_text": str}]
     """
     with open(analysis_json_path, "r", encoding="utf-8") as f:
         analysis = json.load(f)
 
-    hooks       = analysis.get("applicable_hooks", [])
-    segments    = analysis.get("segments", {})
-    demo_clip   = segments.get("demo",   {"start": 0.0, "end": 0.0})
-    result_clip = segments.get("result", {"start": 0.0, "end": 0.0})
+    hooks        = analysis.get("applicable_hooks", [])
+    segments     = analysis.get("segments", {})
+    demo_clip    = segments.get("demo",   {"start": 0.0, "end": 0.0})
+    result_clip  = segments.get("result", {"start": 0.0, "end": 0.0})
     cut_analysis = analysis.get("cut_analysis", {})
 
-    # Log cut analysis summary if available
     if cut_analysis:
         jc_count = len(cut_analysis.get("jump_cut_locations", []))
         ac_count = len(cut_analysis.get("action_cut_risks", []))
@@ -547,12 +594,10 @@ def run_rendering_pipeline(
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Temp dir for drawtext text files (auto-cleaned)
     txt_dir = tempfile.mkdtemp(prefix="ai_video_txt_")
     rendered_videos = []
 
     try:
-        # ── Reference clips for user preview ─────────────────────────────────
         demo_ref_path   = str(Path(output_dir) / "reused_demo_clip.mp4")
         result_ref_path = str(Path(output_dir) / "reused_result_clip.mp4")
 
@@ -578,9 +623,25 @@ def run_rendering_pipeline(
             label="reused_result"
         )
 
-        # ── Render each hook variant ──────────────────────────────────────────
         for idx, hook in enumerate(hooks):
             hook_type     = hook.get("type", f"hook_{idx}")
+            best_clip     = hook.get("best_clip", {})
+
+            # Cross-Cut Validation: Drop hook if best_clip overlaps secondary thread
+            cross_cut = cut_analysis.get("cross_cut_threads", {})
+            if cross_cut.get("detected"):
+                thread_b = cross_cut.get("thread_b", [])
+                overlaps_secondary = False
+                for interval in thread_b:
+                    b_start = interval.get("start", interval[0] if isinstance(interval, list) else 0.0)
+                    b_end = interval.get("end", interval[1] if isinstance(interval, list) else 0.0)
+                    if not (best_clip.get("end", 0.0) <= b_start or best_clip.get("start", 0.0) >= b_end):
+                        overlaps_secondary = True
+                        break
+                if overlaps_secondary:
+                    logger.warning(f"  ⚠️ Skipping hook variant '{hook_type}' because it overlaps secondary cross-cut thread.")
+                    continue
+
             safe_name     = hook_type.lower().replace("/", "_").replace(" ", "_")
             out_filename  = f"ad_variant_{safe_name}_hook.mp4"
             output_path   = str(Path(output_dir) / out_filename)
@@ -597,7 +658,8 @@ def run_rendering_pipeline(
                 result_clip=result_clip,
                 output_path=output_path,
                 txt_dir=txt_dir,
-                cut_analysis=cut_analysis
+                cut_analysis=cut_analysis,
+                segments_meta=segments
             )
 
             rendered_videos.append({
@@ -607,7 +669,6 @@ def run_rendering_pipeline(
                 "hook_text": hook.get("new_hook_script", ""),
             })
 
-        # ── Add reference clips to manifest ──────────────────────────────────
         rendered_videos.insert(0, {
             "type":      "Reused Result Clip (Reference Only)",
             "path":      result_ref_path,
@@ -627,7 +688,7 @@ def run_rendering_pipeline(
             )
         })
 
-        # ── Insert shots from cut_analysis → cut them as reference clips ────
+        # ── Insert shots ────
         insert_shots = cut_analysis.get("insert_shots", [])
         for ins_idx, shot in enumerate(insert_shots):
             ins_start = shot.get("start", 0.0)
@@ -636,7 +697,7 @@ def run_rendering_pipeline(
             ins_potential = shot.get("hook_potential", "unknown")
 
             if ins_end - ins_start < 0.2:
-                continue  # Too short to be useful
+                continue
 
             ins_safe = ins_desc.lower().replace(" ", "_")[:30]
             ins_filename = f"insert_shot_{ins_idx}_{ins_safe}.mp4"
@@ -660,7 +721,7 @@ def run_rendering_pipeline(
             except Exception as e:
                 logger.warning(f"  Insert shot {ins_idx} failed: {e}")
 
-        # ── Cutaway shots → cut as B-roll reference clips ─────────────────────
+        # ── Cutaway shots ────
         cutaway_shots = cut_analysis.get("cutaway_shots", [])
         for cut_idx, shot in enumerate(cutaway_shots):
             c_start = shot.get("start", 0.0)
@@ -692,7 +753,7 @@ def run_rendering_pipeline(
             except Exception as e:
                 logger.warning(f"  Cutaway shot {cut_idx} failed: {e}")
 
-        # ── Reaction shots → cut as social proof reference clips ───────────────
+        # ── Reaction shots ────
         reaction_shots = cut_analysis.get("reaction_shots", [])
         for r_idx, shot in enumerate(reaction_shots):
             r_start   = shot.get("start", 0.0)
@@ -725,7 +786,6 @@ def run_rendering_pipeline(
             except Exception as e:
                 logger.warning(f"  Reaction shot {r_idx} failed: {e}")
 
-        # ── Cross-cut threads: log warning if detected ─────────────────────────
         cross_cut = cut_analysis.get("cross_cut_threads", {})
         if cross_cut.get("detected"):
             primary = cross_cut.get("primary_thread", "a")
@@ -739,11 +799,9 @@ def run_rendering_pipeline(
             progress_callback(len(hooks) + 2, len(hooks) + 2, "done")
 
     finally:
-        # Always clean up temp text files
         shutil.rmtree(txt_dir, ignore_errors=True)
         logger.info("Temp text files cleaned up")
 
-    # Save render manifest
     manifest_path = str(Path(output_dir) / "render_manifest.json")
     save_json(rendered_videos, manifest_path)
 

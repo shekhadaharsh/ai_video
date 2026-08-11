@@ -15,7 +15,7 @@ from modules.utils import save_json
 logger = logging.getLogger(__name__)
 
 # ── Pricing Constants ──────────────────────────────────────────────────────────
-MODEL_NAME = "gemini-2.5-pro"  # Gemini 3.1 Pro
+MODEL_NAME = "gemini-3.1-pro-preview"  # Gemini 3.1 Pro
 
 # Standard context pricing (<=200K tokens)
 PRICE_INPUT_PER_1M  = 2.00   # USD per million input tokens
@@ -79,6 +79,42 @@ def calculate_cost(usage_metadata) -> dict:
         "total_cost_inr":     round(total_cost_inr,  4),
         "usd_to_inr_rate":    USD_TO_INR,
     }
+
+
+def calculate_combined_cost(usage_metadata_list: list) -> dict:
+    """
+    Combine token usage and cost across multiple Gemini API calls
+    (e.g. Pass 1 = Task A+B+D, Pass 2 = Task C) into one report.
+    """
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost_usd = 0.0
+
+    for usage_metadata in usage_metadata_list:
+        single_report = calculate_cost(usage_metadata)
+        total_input_tokens += single_report["input_tokens"]
+        total_output_tokens += single_report["output_tokens"]
+        total_cost_usd += single_report["total_cost_usd"]
+
+    total_cost_inr = total_cost_usd * USD_TO_INR
+
+    # Check if context threshold was breached by either call
+    is_long_context = total_input_tokens > LONG_CONTEXT_THRESHOLD
+
+    return {
+        "model":              MODEL_NAME,
+        "pricing_tier":       "long_context" if is_long_context else "standard",
+        "calls_combined":     len(usage_metadata_list),
+        "input_tokens":       total_input_tokens,
+        "output_tokens":      total_output_tokens,
+        "total_tokens":       total_input_tokens + total_output_tokens,
+        "input_cost_usd":     round(total_cost_usd * (total_input_tokens / max(1, total_input_tokens + total_output_tokens)), 6),
+        "output_cost_usd":    round(total_cost_usd * (total_output_tokens / max(1, total_input_tokens + total_output_tokens)), 6),
+        "total_cost_usd":     round(total_cost_usd, 6),
+        "total_cost_inr":     round(total_cost_inr, 4),
+        "usd_to_inr_rate":    USD_TO_INR,
+    }
+
 
     logger.info(
         f"Cost: {input_tokens} input + {output_tokens} output tokens = "
