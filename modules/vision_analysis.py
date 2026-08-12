@@ -222,6 +222,40 @@ Respond ONLY with valid JSON — no markdown fences, no extra commentary:
 }}"""
 
 
+def robust_json_loads(text: str) -> dict:
+    """Parse JSON string with multi-stage sanitization (missing commas, unquoted keys, single quotes, unescaped inner quotes, and truncation repair)."""
+    import re
+    cleaned = clean_json_response(text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Stage 1: Fix missing commas between properties/objects separated by newlines
+    cleaned = re.sub(r'("|\d|true|false|null|\}|\])\s*\n\s*("|\{)', r'\1,\n\2', cleaned)
+    # Stage 2: Remove trailing commas before } or ]
+    cleaned = re.sub(r',\s*([\}\]])', r'\1', cleaned)
+    # Stage 3: Fix unquoted keys
+    cleaned = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', cleaned)
+    # Stage 4: Fix single quotes
+    cleaned = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", r'"\1"', cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Stage 5: Repair truncated JSON (if Gemini hit token limit mid-output)
+    if cleaned.count('"') % 2 != 0:
+        cleaned += '"'
+    open_braces = cleaned.count('{') - cleaned.count('}')
+    open_brackets = cleaned.count('[') - cleaned.count(']')
+    cleaned += ']' * max(0, open_brackets)
+    cleaned += '}' * max(0, open_braces)
+
+    return json.loads(cleaned)
+
+
 # ── Data Normalizer ────────────────────────────────────────────────────────────
 def normalize_analysis_data(data: dict) -> dict:
     """Fix common structural variations returned by Gemini."""
@@ -372,18 +406,17 @@ def run_vision_analysis(
         logger.info("Pass 1 response received. Normalizing & Parsing JSON...")
 
         raw_text1 = resp1.text
-        cleaned_text1 = clean_json_response(raw_text1)
         analysis = None
         last_error = None
 
         try:
-            raw_data = json.loads(cleaned_text1)
+            raw_data = robust_json_loads(raw_text1)
             analysis = normalize_analysis_data(raw_data)
-        except json.JSONDecodeError as e:
+        except Exception as e:
             last_error = e
             logger.warning(f"Pass 1 response parse failed: {e}. Retrying with fallback...")
 
-        # Fallback for Pass 1: simplified JSON structure with multiple hooks example
+        # Fallback for Pass 1: simplified JSON structure with ALL hook categories
         if analysis is None:
             simplified_prompt = f"""You are analyzing a short product video ({video_duration:.1f}s).
 Provide Tasks A, B, D. Output valid JSON with:
@@ -438,8 +471,7 @@ Provide Tasks A, B, D. Output valid JSON with:
             logger.info("Pass 2 response received. Merging JSON...")
 
             raw_text2 = resp2.text
-            cleaned_text2 = clean_json_response(raw_text2)
-            cut_data = json.loads(cleaned_text2)
+            cut_data = robust_json_loads(raw_text2)
 
             analysis["cut_analysis"] = cut_data.get("cut_analysis", {})
         except Exception as e_cut:

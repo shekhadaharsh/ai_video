@@ -195,20 +195,44 @@ def load_json(file_path: str) -> dict | list:
 
 def clean_json_response(text: str) -> str:
     """
-    Strip markdown code fences from Gemini API responses.
-    Handles: ```json ... ```, ``` ... ```, and plain JSON.
+    Strip markdown code fences and sanitize JSON from Gemini API responses.
+    Handles: ```json ... ```, unquoted keys, single quotes, trailing commas, and boundary extraction.
     """
+    import re
+
     text = text.strip()
 
-    # Remove opening fence (```json or ```)
+    # Remove markdown code fences if present
     if text.startswith("```"):
         lines = text.split("\n")
-        # Remove first line (the fence) and last line (closing ```)
         if lines[0].startswith("```"):
             lines = lines[1:]
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines).strip()
+
+    # Extract JSON object boundaries { ... }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end+1]
+
+    # Try standard json parse first
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+
+    # Sanitize common dirty JSON syntax issues
+    # 1. Fix missing commas between properties/objects separated by newlines
+    text = re.sub(r'("|\d|true|false|null|\}|\])\s*\n\s*("|\{)', r'\1,\n\2', text)
+    # 2. Remove trailing commas before } or ]
+    text = re.sub(r',\s*([\}\]])', r'\1', text)
+    # 3. Fix unquoted keys: { key: -> { "key":
+    text = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', text)
+    # 4. Fix single-quoted strings: 'val' -> "val"
+    text = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", r'"\1"', text)
 
     return text
 

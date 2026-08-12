@@ -223,7 +223,24 @@ def init_session_state():
 
 
 # ── Pipeline Runner ─────────────────────────────────────────────────────────────
-def run_pipeline_streamlit(video_path: str, status_container):
+def run_pipeline_streamlit(video_path: str, progress_callback=None) -> dict:
+    """
+    Run the complete 5-step pipeline for Streamlit UI.
+    """
+    import importlib
+    import modules.utils
+    import modules.vision_analysis
+    import modules.frame_analyzer
+    import modules.render
+    import modules.cost_tracker
+    importlib.reload(modules.utils)
+    importlib.reload(modules.vision_analysis)
+    importlib.reload(modules.frame_analyzer)
+    importlib.reload(modules.render)
+    importlib.reload(modules.cost_tracker)
+    from modules.vision_analysis import run_vision_analysis
+    from modules.frame_analyzer import analyze_video_structure, reconcile_analysis_timestamps
+    from modules.render import run_rendering_pipeline
     """
     Run 720p compression and native Gemini File API video analysis.
     """
