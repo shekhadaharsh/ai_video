@@ -223,13 +223,14 @@ def init_session_state():
 
 
 # ── Pipeline Runner ─────────────────────────────────────────────────────────────
-def run_pipeline_streamlit(video_path: str, progress_callback=None) -> dict:
+def run_pipeline_streamlit(video_path: str, status_container=None, progress_callback=None) -> dict:
     """
     Run the complete 5-step pipeline for Streamlit UI.
     """
     import importlib
     import modules.utils
     import modules.vision_analysis
+    
     import modules.frame_analyzer
     import modules.render
     import modules.cost_tracker
