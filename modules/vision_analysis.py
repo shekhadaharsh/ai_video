@@ -45,7 +45,7 @@ IMPORTANT CONTEXT ABOUT THE SOURCE VIDEO:
 ════════════════════════════════════════════════════════
 TASK A — Segment the video by MEANING (not fixed time percentages):
 ════════════════════════════════════════════════════════
-- hook:    the opening attention-grabbing moment
+- hook:    the opening attention-grabbing moment (if video starts directly with problem/demo, set hook to cover the first 3-5 seconds so no segment is 0s)
 - problem: where the pain point / problem is described or shown
 - demo:    where the product is being used/demonstrated
 - result:  where the outcome/result and any call-to-action appears
@@ -60,41 +60,29 @@ CRITICAL RULES FOR SEGMENT TIMESTAMPS:
 ════════════════════════════════════════════════════════
 TASK B — Hook-type evaluation
 ════════════════════════════════════════════════════════
+GOAL: Aim to identify as MANY distinct valid hooks as the video genuinely supports (typically 3 to 6 hooks per video, covering categories like Problem, Result, Emotional, Testimonial, Before/After, Offer). Do NOT restrict yourself to only 1 hook if the video contains content for multiple categories.
+
 Evaluate each of these six categories: Problem, Result, Emotional, Testimonial, Offer, Before/After.
-Only include a category if the video contains genuine supporting evidence (spoken OR visual).
-Never force a category that has to be invented — the number of applicable hooks is NOT fixed
-and will vary by video (anywhere from 0 to 6).
+Include every category that has spoken OR visual supporting evidence.
 
 For every included category, provide:
+- "type": the hook category name ("Problem", "Result", "Emotional", "Testimonial", "Offer", or "Before/After")
 - "evidence": one sentence citing the specific spoken line or visual cue that justifies this hook
-- "best_clip": the timestamp range of the best existing moment to pair with the new hook
+- "best_clip": object containing "start" and "end" float timestamps of the best moment for this hook
 - "new_hook_script": a new short hook message (MAX 8 WORDS for text overlay fit), written in
-  the SAME language/style/register as the original video's spoken audio — preserve code-switching
-  if present, do not translate to pure English or pure Hindi if the original mixes both.
+  the SAME language/style/register as the original video's spoken audio (preserve code-switching if present).
 
-STRICT CLIP BOUNDARY RULES (every rule applies to every best_clip):
+STRICT CLIP BOUNDARY RULES:
 1. best_clip.start MUST fall at a natural moment of silence or a clear pause in speech.
-   If speech is playing at time X, never set start=X — listen for the gap BEFORE speech begins.
 2. best_clip.end MUST fall at a natural moment of silence or a clear pause in speech.
-   Never cut off mid-sentence or mid-word; the clip must be audibly complete if played standalone.
-3. Duration should be as long as needed to capture one complete spoken thought — no shorter,
-   no longer. Typical range is 3 to 12 seconds depending on the video's speech pace and
-   how long the speaker takes to complete a sentence or idea. Do NOT cut mid-thought just
-   to fit a fixed number; prioritize the natural end of a sentence over any target duration.
-   The only hard limit: no single clip may exceed 50% of the total video duration.
-4. SOURCE-SECTION RESTRICTIONS — which part of the video each hook type may draw its best_clip from:
-   - Problem, Emotional  → hook or problem segment ONLY
-   - Result, Before/After → result segment ONLY (transformation/outcome must be visible/spoken)
-   - Testimonial         → problem, demo, or result — wherever the personal-experience statement
-                           (day-by-day account, direct praise, honest review language) actually occurs
-   - Offer               → wherever price/discount/promotional info is shown or spoken
-5. No best_clip may cover more than 60% of the total duration of the segment it is drawn from.
-   This prevents selecting an entire section as a clip instead of a focused moment within it.
-   Example: if the result segment is 8 seconds long, the best_clip may be at most 4.8 seconds.
-6. DEDUPLICATION: no two best_clips across all applicable_hooks may overlap by more than 30%
-   of either clip's duration. If two strong candidate moments overlap by that much, keep only
-   the stronger/more specific one and either find a different non-overlapping clip for the other
-   hook type or exclude that hook type entirely from the output.
+3. Duration should capture one complete spoken thought (typically 3 to 12 seconds).
+4. SOURCE-SECTION RESTRICTIONS:
+   - Problem, Emotional  → hook or problem segment (or early demo)
+   - Result, Before/After → result or demo segment (where outcome/transformation is visible or spoken)
+   - Testimonial         → problem, demo, or result (where honest user experience/praise language occurs)
+   - Offer               → anywhere price/discount/promotional info is shown or spoken
+5. No best_clip may cover more than 85% of the total duration of the segment it is drawn from (or up to 100% if the segment itself is under 6 seconds).
+6. DEDUPLICATION: No two best_clips across applicable_hooks should have the exact same start and end timestamps. Vary the timestamps to capture distinct moments whenever possible.
 
 ════════════════════════════════════════════════════════
 TASK D — Audio/Video Sync Offset Detection:
@@ -107,11 +95,6 @@ synced within that segment. If not synced, estimate the offset in seconds:
 - If synced, set the value to 0.0
 Provide this as "av_offset_seconds" on every segment object.
 
-FALLBACK BEHAVIOR (important):
-If no clip satisfying ALL of the above rules can be found for a given hook category,
-DO NOT force a rule-breaking clip. Simply exclude that hook category from the output.
-If the entire video is too short or lacks distinct content, return an empty applicable_hooks array.
-
 ════════════════════════════════════════════════════════
 OUTPUT FORMAT
 ════════════════════════════════════════════════════════
@@ -119,16 +102,28 @@ Respond ONLY with valid JSON — no markdown fences, no extra commentary:
 
 {{
   "segments": {{
-    "hook":    {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}},
-    "problem": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}},
-    "demo":    {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}},
-    "result":  {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}
+    "hook":    {{"start": 0.0, "end": 4.0, "av_offset_seconds": 0.0}},
+    "problem": {{"start": 4.0, "end": 9.0, "av_offset_seconds": 0.0}},
+    "demo":    {{"start": 9.0, "end": 18.0, "av_offset_seconds": 0.0}},
+    "result":  {{"start": 18.0, "end": 25.0, "av_offset_seconds": 0.0}}
   }},
   "applicable_hooks": [
     {{
       "type": "Problem",
       "evidence": "specific spoken line or visual cue",
-      "best_clip": {{"start": 0.0, "end": 0.0}},
+      "best_clip": {{"start": 0.0, "end": 4.5}},
+      "new_hook_script": "max 8 word text overlay"
+    }},
+    {{
+      "type": "Result",
+      "evidence": "specific spoken line or visual cue showing outcome",
+      "best_clip": {{"start": 18.0, "end": 22.5}},
+      "new_hook_script": "max 8 word text overlay"
+    }},
+    {{
+      "type": "Testimonial",
+      "evidence": "specific personal recommendation line",
+      "best_clip": {{"start": 9.0, "end": 14.0}},
       "new_hook_script": "max 8 word text overlay"
     }}
   ]
@@ -227,6 +222,48 @@ Respond ONLY with valid JSON — no markdown fences, no extra commentary:
 }}"""
 
 
+# ── Data Normalizer ────────────────────────────────────────────────────────────
+def normalize_analysis_data(data: dict) -> dict:
+    """Fix common structural variations returned by Gemini."""
+    if not isinstance(data, dict):
+        return data
+
+    hooks = data.get("applicable_hooks", [])
+    if isinstance(hooks, list):
+        for hook in hooks:
+            if isinstance(hook, dict):
+                best_clip = hook.get("best_clip", {})
+                # If Gemini nested new_hook_script inside best_clip, lift it up
+                if isinstance(best_clip, dict):
+                    if "new_hook_script" in best_clip and not hook.get("new_hook_script"):
+                        hook["new_hook_script"] = best_clip.pop("new_hook_script")
+
+                hook.setdefault("new_hook_script", "")
+                hook.setdefault("evidence", "")
+
+                if isinstance(best_clip, dict):
+                    try:
+                        best_clip["start"] = float(best_clip.get("start", 0.0))
+                        best_clip["end"] = float(best_clip.get("end", 0.0))
+                    except (ValueError, TypeError):
+                        pass
+
+    segs = data.get("segments", {})
+    if isinstance(segs, dict):
+        for sname in ("hook", "problem", "demo", "result"):
+            sval = segs.setdefault(sname, {"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0})
+            if isinstance(sval, dict):
+                sval.setdefault("av_offset_seconds", 0.0)
+                try:
+                    sval["start"] = float(sval.get("start", 0.0))
+                    sval["end"] = float(sval.get("end", 0.0))
+                    sval["av_offset_seconds"] = float(sval.get("av_offset_seconds", 0.0))
+                except (ValueError, TypeError):
+                    pass
+
+    return data
+
+
 # ── JSON Validator ─────────────────────────────────────────────────────────────
 def validate_analysis_schema(data: dict) -> tuple[bool, str]:
     """
@@ -246,7 +283,6 @@ def validate_analysis_schema(data: dict) -> tuple[bool, str]:
     for seg_name, seg_val in data["segments"].items():
         if "start" not in seg_val or "end" not in seg_val:
             return False, f"Segment '{seg_name}' missing start/end"
-        # Ensure av_offset_seconds exists (default to 0.0 if prompt failed to include it)
         seg_val.setdefault("av_offset_seconds", 0.0)
 
     if not isinstance(data["applicable_hooks"], list):
@@ -254,7 +290,6 @@ def validate_analysis_schema(data: dict) -> tuple[bool, str]:
 
     valid_hook_types = {"Problem", "Result", "Emotional", "Testimonial", "Offer", "Before/After"}
     for i, hook in enumerate(data["applicable_hooks"]):
-        # Hard-required fields — fail if missing
         if "type" not in hook:
             return False, f"Hook {i} missing 'type' key"
         if "best_clip" not in hook:
@@ -264,8 +299,6 @@ def validate_analysis_schema(data: dict) -> tuple[bool, str]:
         if hook["type"] not in valid_hook_types:
             return False, f"Hook {i} has invalid type: {hook['type']}"
 
-        # Soft-optional fields — default if missing rather than failing
-        # Gemini sometimes omits these in fallback/compressed responses
         hook.setdefault("new_hook_script", "")
         hook.setdefault("evidence", "")
 
@@ -296,8 +329,7 @@ def run_vision_analysis(
     Full Step 4 orchestration using native Gemini File API in TWO sequential calls.
       Pass 1: Segments, Hooks, and Source A/V Offset (Task A, B, D)
       Pass 2: Detailed Cut Analysis (Task C)
-    Resilient design: If Pass 2 fails, we fallback to default cut analysis
-    rather than failing the entire run.
+    Uses response_mime_type="application/json" for guaranteed valid JSON.
     """
     paths = get_paths(video_id)
     client = genai.Client()
@@ -333,10 +365,11 @@ def run_vision_analysis(
             contents=[uploaded_file, prompt1],
             config=types.GenerateContentConfig(
                 temperature=0.1,
+                response_mime_type="application/json",
                 max_output_tokens=4096,
             )
         ))
-        logger.info("Pass 1 response received. Parsing JSON...")
+        logger.info("Pass 1 response received. Normalizing & Parsing JSON...")
 
         raw_text1 = resp1.text
         cleaned_text1 = clean_json_response(raw_text1)
@@ -344,16 +377,17 @@ def run_vision_analysis(
         last_error = None
 
         try:
-            analysis = json.loads(cleaned_text1)
+            raw_data = json.loads(cleaned_text1)
+            analysis = normalize_analysis_data(raw_data)
         except json.JSONDecodeError as e:
             last_error = e
             logger.warning(f"Pass 1 response parse failed: {e}. Retrying with fallback...")
 
-        # Fallback for Pass 1: simplified JSON structure
+        # Fallback for Pass 1: simplified JSON structure with multiple hooks example
         if analysis is None:
             simplified_prompt = f"""You are analyzing a short product video ({video_duration:.1f}s).
-Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
-{{"segments": {{"hook": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "problem": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "demo": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "result": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}}}, "applicable_hooks": [{{"type": "Problem", "evidence": "", "best_clip": {{"start": 0.0, "end": 0.0}}, "new_hook_script": ""}}]}}"""
+Provide Tasks A, B, D. Output valid JSON with:
+{{"segments": {{"hook": {{"start": 0.0, "end": 4.0, "av_offset_seconds": 0.0}}, "problem": {{"start": 4.0, "end": 9.0, "av_offset_seconds": 0.0}}, "demo": {{"start": 9.0, "end": 18.0, "av_offset_seconds": 0.0}}, "result": {{"start": 18.0, "end": {video_duration:.1f}, "av_offset_seconds": 0.0}}}}, "applicable_hooks": [{{"type": "Problem", "evidence": "spoken pain point", "best_clip": {{"start": 0.0, "end": 4.0}}, "new_hook_script": "Short hook overlay text"}}, {{"type": "Result", "evidence": "showing result", "best_clip": {{"start": 18.0, "end": 22.0}}, "new_hook_script": "Result hook overlay text"}}]}}"""
 
             logger.info("Retrying Gemini Pass 1 with simplified fallback...")
             retry_resp = _retry_api_call(lambda: client.models.generate_content(
@@ -361,12 +395,14 @@ Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
                 contents=[uploaded_file, simplified_prompt],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
+                    response_mime_type="application/json",
                     max_output_tokens=2048,
                 )
             ))
             retry_text = clean_json_response(retry_resp.text)
             try:
-                analysis = json.loads(retry_text)
+                raw_data = json.loads(retry_text)
+                analysis = normalize_analysis_data(raw_data)
                 logger.info("Pass 1 fallback succeeded.")
             except json.JSONDecodeError as e2:
                 raise ValueError(
@@ -387,7 +423,6 @@ Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
         prompt2 = build_prompt_pass2(video_duration)
         logger.info(f"Calling Gemini Pass 2 (Task C — Cut Analysis)...")
 
-        # Keep metadata track in case call 2 is successful
         resp2_metadata = None
         try:
             resp2 = _retry_api_call(lambda: client.models.generate_content(
@@ -395,6 +430,7 @@ Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
                 contents=[uploaded_file, prompt2],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
+                    response_mime_type="application/json",
                     max_output_tokens=4096,
                 )
             ))
@@ -405,14 +441,13 @@ Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
             cleaned_text2 = clean_json_response(raw_text2)
             cut_data = json.loads(cleaned_text2)
 
-            # Merge cut analysis into final dict
             analysis["cut_analysis"] = cut_data.get("cut_analysis", {})
         except Exception as e_cut:
-            logger.warning(f"⚠️ Pass 2 (Cut Analysis) failed or returned invalid JSON: {e_cut}. Continuing with empty cut_analysis.")
+            logger.warning(f"⚠️ Pass 2 (Cut Analysis) failed or returned invalid JSON: {e_cut}. Continuing with default cut_analysis.")
             analysis["cut_analysis"] = {
                 "segment_boundaries": {
                     "hook_end": {"cut_type": "default", "audio_offset_seconds": 0.0, "is_mid_action": False, "safe_timestamp": 0.0},
-                    "problem_end": {"cut_type": "default", "audio_offset_seconds": 0.0, "is_mid_action": false, "safe_timestamp": 0.0},
+                    "problem_end": {"cut_type": "default", "audio_offset_seconds": 0.0, "is_mid_action": False, "safe_timestamp": 0.0},
                     "demo_end": {"cut_type": "default", "audio_offset_seconds": 0.0, "is_mid_action": False, "safe_timestamp": 0.0}
                 }
             }
@@ -432,7 +467,6 @@ Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
         return analysis
 
     finally:
-        # ALWAYS delete the video file from Google servers
         if uploaded_file:
             try:
                 logger.info(f"Cleaning up: deleting video file {uploaded_file.name} from Google servers...")
