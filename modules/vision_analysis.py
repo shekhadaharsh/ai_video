@@ -272,6 +272,20 @@ def validate_analysis_schema(data: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def _retry_api_call(fn, max_retries=3, delay=3):
+    """Retry API call on temporary network or HTTP errors (e.g. getaddrinfo failed, 503, 429)."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            err_str = str(e)
+            if attempt < max_retries and ("ConnectError" in err_str or "getaddrinfo" in err_str or "503" in err_str or "429" in err_str or "httpx" in err_str):
+                logger.warning(f"  Network/API glitch (attempt {attempt}/{max_retries}): {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                raise
+
+
 # ── Main Analysis (Two-Pass Orchestrator) ──────────────────────────────────────
 def run_vision_analysis(
     video_id: str,
@@ -290,9 +304,9 @@ def run_vision_analysis(
     uploaded_file = None
 
     try:
-        # 1. Upload compressed video to Gemini File API
+        # 1. Upload compressed video to Gemini File API (with retry)
         logger.info(f"Uploading compressed video to Gemini File API...")
-        uploaded_file = client.files.upload(file=Path(compressed_video_path))
+        uploaded_file = _retry_api_call(lambda: client.files.upload(file=Path(compressed_video_path)))
         logger.info(f"  File name on server: {uploaded_file.name}")
 
         # 2. Wait for Google server processing to finish (status ACTIVE)
@@ -301,7 +315,7 @@ def run_vision_analysis(
             poll_count += 1
             logger.info(f"  Processing on Google servers... (poll #{poll_count})")
             time.sleep(5)
-            uploaded_file = client.files.get(name=uploaded_file.name)
+            uploaded_file = _retry_api_call(lambda: client.files.get(name=uploaded_file.name))
 
         if uploaded_file.state.name == "FAILED":
             raise RuntimeError("Gemini File API processing failed on Google servers.")
@@ -314,14 +328,14 @@ def run_vision_analysis(
         prompt1 = build_prompt_pass1(video_duration)
         logger.info(f"Calling Gemini Pass 1 (Task A+B+D)...")
 
-        resp1 = client.models.generate_content(
+        resp1 = _retry_api_call(lambda: client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[uploaded_file, prompt1],
             config=types.GenerateContentConfig(
                 temperature=0.1,
                 max_output_tokens=4096,
             )
-        )
+        ))
         logger.info("Pass 1 response received. Parsing JSON...")
 
         raw_text1 = resp1.text
@@ -342,14 +356,14 @@ Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
 {{"segments": {{"hook": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "problem": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "demo": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}, "result": {{"start": 0.0, "end": 0.0, "av_offset_seconds": 0.0}}}}, "applicable_hooks": [{{"type": "Problem", "evidence": "", "best_clip": {{"start": 0.0, "end": 0.0}}, "new_hook_script": ""}}]}}"""
 
             logger.info("Retrying Gemini Pass 1 with simplified fallback...")
-            retry_resp = client.models.generate_content(
+            retry_resp = _retry_api_call(lambda: client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[uploaded_file, simplified_prompt],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
                     max_output_tokens=2048,
                 )
-            )
+            ))
             retry_text = clean_json_response(retry_resp.text)
             try:
                 analysis = json.loads(retry_text)
@@ -376,14 +390,14 @@ Provide ONLY Tasks A and B from this analysis. Output valid JSON with:
         # Keep metadata track in case call 2 is successful
         resp2_metadata = None
         try:
-            resp2 = client.models.generate_content(
+            resp2 = _retry_api_call(lambda: client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[uploaded_file, prompt2],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
                     max_output_tokens=4096,
                 )
-            )
+            ))
             resp2_metadata = resp2.usage_metadata
             logger.info("Pass 2 response received. Merging JSON...")
 
