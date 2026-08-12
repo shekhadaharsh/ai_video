@@ -254,14 +254,20 @@ def validate_analysis_schema(data: dict) -> tuple[bool, str]:
 
     valid_hook_types = {"Problem", "Result", "Emotional", "Testimonial", "Offer", "Before/After"}
     for i, hook in enumerate(data["applicable_hooks"]):
-        required_keys = {"type", "evidence", "best_clip", "new_hook_script"}
-        missing_keys = required_keys - set(hook.keys())
-        if missing_keys:
-            return False, f"Hook {i} missing keys: {missing_keys}"
-        if hook["type"] not in valid_hook_types:
-            return False, f"Hook {i} has invalid type: {hook['type']}"
+        # Hard-required fields — fail if missing
+        if "type" not in hook:
+            return False, f"Hook {i} missing 'type' key"
+        if "best_clip" not in hook:
+            return False, f"Hook {i} missing 'best_clip' key"
         if "start" not in hook["best_clip"] or "end" not in hook["best_clip"]:
             return False, f"Hook {i} best_clip missing start/end"
+        if hook["type"] not in valid_hook_types:
+            return False, f"Hook {i} has invalid type: {hook['type']}"
+
+        # Soft-optional fields — default if missing rather than failing
+        # Gemini sometimes omits these in fallback/compressed responses
+        hook.setdefault("new_hook_script", "")
+        hook.setdefault("evidence", "")
 
     return True, ""
 
