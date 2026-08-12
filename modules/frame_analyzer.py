@@ -211,10 +211,14 @@ def validate_post_reconciliation(analysis: dict, original_analysis: dict) -> dic
         
         if h_type in ("Problem", "Emotional"):
             allowed_start = segs.get("hook", {}).get("start", 0.0)
-            allowed_end = segs.get("problem", {}).get("end", 999.0)
+            allowed_end = segs.get("demo", {}).get("end", 999.0)
         elif h_type in ("Result", "Before/After"):
-            allowed_start = segs.get("result", {}).get("start", 0.0)
+            allowed_start = segs.get("demo", {}).get("start", 0.0)
             allowed_end = segs.get("result", {}).get("end", 999.0)
+        else:
+            # Testimonial, Offer, or other categories — allow across full video
+            allowed_start = 0.0
+            allowed_end = 999.0
             
         if clip.get("start", 0.0) < allowed_start or clip.get("end", 0.0) > allowed_end:
             logger.warning(
