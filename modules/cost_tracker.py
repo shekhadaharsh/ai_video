@@ -15,7 +15,7 @@ from modules.utils import save_json
 logger = logging.getLogger(__name__)
 
 # ── Pricing Constants ──────────────────────────────────────────────────────────
-MODEL_NAME = "gemini-3.1-pro-preview"  # Gemini 3.1 Pro
+MODEL_NAME = "gemini-3.1-pro-preview"
 
 # Standard context pricing (<=200K tokens)
 PRICE_INPUT_PER_1M  = 2.00   # USD per million input tokens
@@ -44,18 +44,20 @@ def calculate_cost(usage_metadata) -> dict:
     Returns:
         dict with token counts, USD costs, and INR cost
     """
-    # New google-genai SDK uses prompt_token_count / candidates_token_count
-    # Fallback to total_token_count if individual counts not available
-    input_tokens = (
-        getattr(usage_metadata, "prompt_token_count", None)
-        or getattr(usage_metadata, "input_token_count", None)
-        or 0
-    )
-    output_tokens = (
-        getattr(usage_metadata, "candidates_token_count", None)
-        or getattr(usage_metadata, "output_token_count", None)
-        or 0
-    )
+    if usage_metadata is None:
+        input_tokens = 0
+        output_tokens = 0
+    else:
+        input_tokens = (
+            getattr(usage_metadata, "prompt_token_count", None)
+            or getattr(usage_metadata, "input_token_count", None)
+            or 0
+        )
+        output_tokens = (
+            getattr(usage_metadata, "candidates_token_count", None)
+            or getattr(usage_metadata, "output_token_count", None)
+            or 0
+        )
 
     # Determine pricing tier based on input tokens
     is_long_context = input_tokens > LONG_CONTEXT_THRESHOLD
@@ -80,6 +82,12 @@ def calculate_cost(usage_metadata) -> dict:
         "usd_to_inr_rate":    USD_TO_INR,
     }
 
+    logger.info(
+        f"Cost: {input_tokens} input + {output_tokens} output tokens = "
+        f"${total_cost_usd:.4f} USD (₹{total_cost_inr:.2f})"
+    )
+    return report
+
 
 def calculate_combined_cost(usage_metadata_list: list) -> dict:
     """
@@ -90,34 +98,37 @@ def calculate_combined_cost(usage_metadata_list: list) -> dict:
     total_output_tokens = 0
     total_cost_usd = 0.0
 
+    valid_calls = 0
     for usage_metadata in usage_metadata_list:
-        single_report = calculate_cost(usage_metadata)
-        total_input_tokens += single_report["input_tokens"]
-        total_output_tokens += single_report["output_tokens"]
-        total_cost_usd += single_report["total_cost_usd"]
+        if usage_metadata is not None:
+            single_report = calculate_cost(usage_metadata)
+            total_input_tokens += single_report["input_tokens"]
+            total_output_tokens += single_report["output_tokens"]
+            total_cost_usd += single_report["total_cost_usd"]
+            valid_calls += 1
 
     total_cost_inr = total_cost_usd * USD_TO_INR
-
-    # Check if context threshold was breached by either call
     is_long_context = total_input_tokens > LONG_CONTEXT_THRESHOLD
 
-    return {
+    total_tokens = total_input_tokens + total_output_tokens
+    denom = max(1, total_tokens)
+
+    report = {
         "model":              MODEL_NAME,
         "pricing_tier":       "long_context" if is_long_context else "standard",
-        "calls_combined":     len(usage_metadata_list),
+        "calls_combined":     valid_calls,
         "input_tokens":       total_input_tokens,
         "output_tokens":      total_output_tokens,
-        "total_tokens":       total_input_tokens + total_output_tokens,
-        "input_cost_usd":     round(total_cost_usd * (total_input_tokens / max(1, total_input_tokens + total_output_tokens)), 6),
-        "output_cost_usd":    round(total_cost_usd * (total_output_tokens / max(1, total_input_tokens + total_output_tokens)), 6),
+        "total_tokens":       total_tokens,
+        "input_cost_usd":     round(total_cost_usd * (total_input_tokens / denom), 6),
+        "output_cost_usd":    round(total_cost_usd * (total_output_tokens / denom), 6),
         "total_cost_usd":     round(total_cost_usd, 6),
         "total_cost_inr":     round(total_cost_inr, 4),
         "usd_to_inr_rate":    USD_TO_INR,
     }
 
-
     logger.info(
-        f"Cost: {input_tokens} input + {output_tokens} output tokens = "
+        f"Combined Cost ({valid_calls} calls): {total_input_tokens} input + {total_output_tokens} output tokens = "
         f"${total_cost_usd:.4f} USD (₹{total_cost_inr:.2f})"
     )
     return report
