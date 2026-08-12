@@ -181,61 +181,49 @@ def analyze_video_structure(video_path):
 
 def validate_post_reconciliation(analysis: dict, original_analysis: dict) -> dict:
     """
-    Validate post-reconciliation contiguity and section boundaries.
+    Validate post-reconciliation contiguity and clamp hook clips safely.
     """
     segs = analysis.get("segments", {})
-    seg_names = ["hook", "problem", "demo", "result"]
-    
-    # 1. Contiguity Check
-    for i in range(len(seg_names) - 1):
-        curr_name = seg_names[i]
-        next_name = seg_names[i+1]
-        curr_seg = segs.get(curr_name)
-        next_seg = segs.get(next_name)
-        if curr_seg and next_seg:
-            if abs(curr_seg["end"] - next_seg["start"]) > 0.001:
-                logger.warning(
-                    f"  [Reconcile Validation] Contiguity broken: '{curr_name}' end ({curr_seg['end']:.3f}s) "
-                    f"!= '{next_name}' start ({next_seg['start']:.3f}s). Re-aligning..."
-                )
-                curr_seg["end"] = next_seg["start"]
 
-    # 2. Section Restrictions Check for best_clips
-    original_hooks = original_analysis.get("applicable_hooks", [])
-    for idx, hook in enumerate(analysis.get("applicable_hooks", [])):
-        h_type = hook.get("type", "")
-        clip = hook.get("best_clip", {})
-        
-        allowed_start = 0.0
-        allowed_end = 999.0
-        
-        if h_type in ("Problem", "Emotional"):
-            allowed_start = segs.get("hook", {}).get("start", 0.0)
-            allowed_end = segs.get("demo", {}).get("end", 999.0)
-        elif h_type in ("Result", "Before/After"):
-            allowed_start = segs.get("demo", {}).get("start", 0.0)
-            allowed_end = segs.get("result", {}).get("end", 999.0)
-        else:
-            # Testimonial, Offer, or other categories — allow across full video
-            allowed_start = 0.0
-            allowed_end = 999.0
-            
-        if clip.get("start", 0.0) < allowed_start or clip.get("end", 0.0) > allowed_end:
-            logger.warning(
-                f"  [Reconcile Validation] Snapped hook '{h_type}' clip [{clip.get('start', 0.0):.2f}s - {clip.get('end', 0.0):.2f}s] "
-                f"crossed disallowed boundaries [{allowed_start:.2f}s - {allowed_end:.2f}s]."
+    # 1. Chronological Contiguity Check
+    # Sort segments by start timestamp to handle any section order (e.g. hook -> problem -> result -> demo)
+    sorted_segs = sorted(
+        [s for s in segs.values() if isinstance(s, dict) and s.get("end", 0.0) > s.get("start", 0.0)],
+        key=lambda x: x.get("start", 0.0)
+    )
+    for i in range(len(sorted_segs) - 1):
+        s1 = sorted_segs[i]
+        s2 = sorted_segs[i+1]
+        if abs(s1["end"] - s2["start"]) > 0.001:
+            logger.info(
+                f"  [Reconcile Validation] Aligning segment boundary: "
+                f"{s1['end']:.3f}s -> {s2['start']:.3f}s"
             )
-            # Revert to original valid timestamp
-            orig_clip = original_hooks[idx].get("best_clip", {}) if idx < len(original_hooks) else {}
-            if orig_clip.get("start", 0.0) >= allowed_start and orig_clip.get("end", 0.0) <= allowed_end:
-                logger.info(f"    Reverting to pre-snap: {orig_clip.get('start', 0.0):.2f}s - {orig_clip.get('end', 0.0):.2f}s")
-                clip["start"] = orig_clip.get("start", 0.0)
-                clip["end"] = orig_clip.get("end", 0.0)
-            else:
-                logger.warning(f"    Original clip also out of bounds. Excluding hook '{h_type}'.")
-                hook["_exclude"] = True
+            s1["end"] = s2["start"]
 
-    analysis["applicable_hooks"] = [h for h in analysis["applicable_hooks"] if not h.pop("_exclude", False)]
+    # 2. Hook Clip Integrity Check
+    # Ensure all best_clips are valid (start < end and within video bounds)
+    total_dur = max([s.get("end", 0.0) for s in segs.values()] or [999.0])
+    valid_hooks = []
+
+    for idx, hook in enumerate(analysis.get("applicable_hooks", [])):
+        clip = hook.get("best_clip", {})
+        c_start = clip.get("start", 0.0)
+        c_end = clip.get("end", 0.0)
+
+        # Clamp bounds safely
+        c_start = max(0.0, min(c_start, total_dur))
+        c_end = max(c_start + 0.5, min(c_end, total_dur))
+
+        clip["start"] = round(c_start, 3)
+        clip["end"] = round(c_end, 3)
+
+        if clip["end"] > clip["start"] + 0.2:
+            valid_hooks.append(hook)
+        else:
+            logger.warning(f"  [Reconcile Validation] Excluding hook '{hook.get('type')}' due to zero clip duration.")
+
+    analysis["applicable_hooks"] = valid_hooks
     return analysis
 
 
