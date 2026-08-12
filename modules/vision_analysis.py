@@ -262,6 +262,26 @@ def normalize_analysis_data(data: dict) -> dict:
     if not isinstance(data, dict):
         return data
 
+    # 1. Handle nested root wrappers (e.g. {"analysis": {...}} or {"data": {...}})
+    for wrapper in ("analysis", "data", "result", "output", "response"):
+        if wrapper in data and isinstance(data[wrapper], dict) and ("segments" in data[wrapper] or "applicable_hooks" in data[wrapper] or "hooks" in data[wrapper]):
+            data = data[wrapper]
+            break
+
+    # 2. Handle alias names for applicable_hooks
+    for hook_alias in ("hooks", "applicableHooks", "applicable_hook_list", "hook_list", "applicable_hooks_list"):
+        if hook_alias in data and "applicable_hooks" not in data:
+            data["applicable_hooks"] = data.pop(hook_alias)
+
+    data.setdefault("applicable_hooks", [])
+
+    # 3. Handle alias names for segments
+    for seg_alias in ("video_segments", "segment_list", "section_segments"):
+        if seg_alias in data and "segments" not in data:
+            data["segments"] = data.pop(seg_alias)
+
+    data.setdefault("segments", {})
+
     hooks = data.get("applicable_hooks", [])
     if isinstance(hooks, list):
         for hook in hooks:
